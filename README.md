@@ -31,6 +31,9 @@ En tu proyecto de Vercel ve a **Settings → Environment Variables** y define:
   - **`KV_REST_API_TOKEN`**
 
 > Si usas Upstash directo, también valen `UPSTASH_REDIS_REST_URL` y `UPSTASH_REDIS_REST_TOKEN`.
+>
+> Si usas una integración de Redis que te da un string tipo `redis://...`, también funciona con:
+> - **`REDIS_URL`** o cualquier variable que termine en **`_REDIS_URL`** (por ejemplo `digitalesmcca_REDIS_URL`).
 
 ## Desarrollo local
 
