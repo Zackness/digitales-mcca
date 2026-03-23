@@ -1,4 +1,4 @@
-import type { IncomingMessage } from 'http'
+import type { IncomingMessage } from 'node:http'
 
 export function isJsonContentType(req: IncomingMessage) {
   const ct = String(req.headers['content-type'] ?? '')

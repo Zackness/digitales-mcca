@@ -60,11 +60,15 @@ async function getRedisViaNodeRedis(redisUrl: string): Promise<RedisLike> {
 function getRedisViaUpstashRest(): RedisLike {
   const url =
     getEnv('KV_REST_API_URL') ??
+    findAnyEnvEndingWith('KV_REST_API_URL') ??
     getEnv('UPSTASH_REDIS_REST_URL') ??
+    findAnyEnvEndingWith('UPSTASH_REDIS_REST_URL') ??
     getEnv('UPSTASH_REDIS_REST_URL'.toLowerCase())
   const token =
     getEnv('KV_REST_API_TOKEN') ??
+    findAnyEnvEndingWith('KV_REST_API_TOKEN') ??
     getEnv('UPSTASH_REDIS_REST_TOKEN') ??
+    findAnyEnvEndingWith('UPSTASH_REDIS_REST_TOKEN') ??
     getEnv('UPSTASH_REDIS_REST_TOKEN'.toLowerCase())
 
   if (!url || !token) {
@@ -77,7 +81,29 @@ function getRedisViaUpstashRest(): RedisLike {
 }
 
 export function getRedis(): RedisLike {
-  const redisUrl = getEnv('REDIS_URL') ?? findAnyEnvEndingWith('REDIS_URL')
+  // Preferimos REST (Vercel KV / Upstash) porque funciona mejor en serverless
+  // y evita problemas de TCP/TLS/DNS con Redis "normal" en algunos entornos.
+  const restUrl =
+    getEnv('KV_REST_API_URL') ??
+    findAnyEnvEndingWith('KV_REST_API_URL') ??
+    getEnv('UPSTASH_REDIS_REST_URL') ??
+    findAnyEnvEndingWith('UPSTASH_REDIS_REST_URL') ??
+    getEnv('UPSTASH_REDIS_REST_URL'.toLowerCase())
+  const restToken =
+    getEnv('KV_REST_API_TOKEN') ??
+    findAnyEnvEndingWith('KV_REST_API_TOKEN') ??
+    getEnv('UPSTASH_REDIS_REST_TOKEN') ??
+    findAnyEnvEndingWith('UPSTASH_REDIS_REST_TOKEN') ??
+    getEnv('UPSTASH_REDIS_REST_TOKEN'.toLowerCase())
+
+  if (restUrl && restToken) {
+    const u = restUrl.replace(/^['"]|['"]$/g, '')
+    const t = restToken.replace(/^['"]|['"]$/g, '')
+    return new UpstashRedis({ url: u, token: t }) as unknown as RedisLike
+  }
+
+  const redisUrlRaw = getEnv('REDIS_URL') ?? findAnyEnvEndingWith('REDIS_URL')
+  const redisUrl = redisUrlRaw?.replace(/^['"]|['"]$/g, '') // strip quotes
   if (redisUrl) {
     // Nota: devolvemos un proxy async; las rutas ya usan await, así que funciona.
     // Para mantener el API igual, retornamos un objeto cuyos métodos esperan a la conexión.
@@ -92,6 +118,8 @@ export function getRedis(): RedisLike {
     return lazy as RedisLike
   }
 
+  // Si llegamos aquí, no hay config REST ni REDIS_URL.
+  // Mantenemos el mensaje anterior para guiar.
   return getRedisViaUpstashRest()
 }
 

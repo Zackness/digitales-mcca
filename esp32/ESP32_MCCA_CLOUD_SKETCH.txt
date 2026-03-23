@@ -1,0 +1,719 @@
+// ESP32 + MAX7219 8x32 (4x MAX7219) + API local + control remoto por Vercel
+// Copia y pega este archivo completo en Arduino IDE (como .ino)
+//
+// IMPORTANTE:
+// - Rellena WIFI_SSID / WIFI_PASS
+// - Rellena DEVICE_TOKEN (debe coincidir con Vercel env var DEVICE_TOKEN)
+// - DEVICE_ID debe coincidir con lo que pones en la web
+//
+// Nota TLS:
+// - Para simplificar, se usa client.setInsecure() al hablar con Vercel.
+//   Si quieres, luego lo pasamos a validación por CA (más seguro).
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ArduinoJson.h>
+#include <SPI.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+
+// =============================
+// CONFIGURACION WIFI
+// =============================
+static const char *WIFI_SSID = "Yoracol";            // <-- CAMBIA
+static const char *WIFI_PASS = "2373577*";  // <-- CAMBIA
+static const char *HOSTNAME  = "mcca-8x32";
+
+// =============================
+// CONFIGURACION CLOUD (VERCEL)
+// =============================
+static const char *CLOUD_BASE_URL = "https://digitales-mcca.vercel.app";
+static const char *DEVICE_ID = "mcca-8x32";
+static const char *DEVICE_TOKEN = "devtok_8cQ0mY4JtN1vZp6sL2aX9rE5uH3kD7wG1bF0nT6qS4yR8xP2mV9cK7jA";
+
+static constexpr uint32_t POLL_EVERY_MS = 1000;    // pedir comando cada 1s
+static constexpr uint32_t REPORT_EVERY_MS = 2000;  // reportar estado cada 2s
+static unsigned long lastPollMs = 0;
+static unsigned long lastReportMs = 0;
+
+static constexpr uint32_t WIFI_RETRY_EVERY_MS = 5000;
+static unsigned long lastWifiRetryMs = 0;
+
+// =============================
+// CONFIGURACION MAX7219
+// 8x32 = 4 chips MAX7219 en cascada (4 * 8 = 32 columnas)
+// =============================
+static constexpr uint8_t ROWS = 8;
+static constexpr uint8_t COLS = 32;
+static constexpr uint8_t CHIP_SIZE = 8;
+static constexpr uint8_t NUM_CHIPS = COLS / CHIP_SIZE; // 4
+
+// Pines para SPI (MAX7219)
+static constexpr uint8_t PIN_DIN  = 23;  // MOSI
+static constexpr uint8_t PIN_CLK  = 18;  // SCK
+static constexpr uint8_t PIN_CS   = 5;   // CS/LOAD
+static constexpr uint8_t PIN_MISO = 19;  // no se usa, pero SPI lo pide
+
+static uint8_t gIntensity = 8; // 0..15
+
+SPIClass maxSpi(VSPI);
+WebServer server(80);
+
+// buffer: cada fila guarda las columnas encendidas.
+// Bit 0 = columna izquierda (x=0). Bit 31 = columna derecha (x=31).
+static uint32_t rowMasks[ROWS];
+
+enum class DisplayMode : uint8_t {
+  OFF = 0,
+  STATIC_PATTERN = 1,
+  SCROLL_TEXT = 2,
+};
+
+static DisplayMode mode = DisplayMode::OFF;
+static bool hwDirty = true;
+
+// =============================
+// FONT 5x7 (ASCII limitado)
+// Cada caracter usa 5 columnas.
+// Cada columna es un byte donde el bit0 es fila 0 (arriba) y bit6 es fila 6.
+// =============================
+static void fontGetGlyphColumns(char c, uint8_t outCols5[5]) {
+  // Normalizamos a mayusculas donde tenga sentido
+  if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+
+  // Por defecto: "?"
+  uint8_t qmark[5] = {0x02, 0x01, 0x51, 0x09, 0x06};
+  outCols5[0] = qmark[0];
+  outCols5[1] = qmark[1];
+  outCols5[2] = qmark[2];
+  outCols5[3] = qmark[3];
+  outCols5[4] = qmark[4];
+
+  switch (c) {
+    case ' ':
+      outCols5[0] = 0x00; outCols5[1] = 0x00; outCols5[2] = 0x00; outCols5[3] = 0x00; outCols5[4] = 0x00;
+      break;
+    case '-':
+      outCols5[0] = 0x08; outCols5[1] = 0x08; outCols5[2] = 0x08; outCols5[3] = 0x08; outCols5[4] = 0x08;
+      break;
+    case '_':
+      outCols5[0] = 0x40; outCols5[1] = 0x40; outCols5[2] = 0x40; outCols5[3] = 0x40; outCols5[4] = 0x00;
+      break;
+    case ':':
+      outCols5[0] = 0x00; outCols5[1] = 0x36; outCols5[2] = 0x36; outCols5[3] = 0x00; outCols5[4] = 0x00;
+      break;
+
+    // Digitos
+    case '0': { uint8_t v[5] = {0x3E, 0x51, 0x49, 0x45, 0x3E}; memcpy(outCols5, v, 5); } break;
+    case '1': { uint8_t v[5] = {0x00, 0x42, 0x7F, 0x40, 0x00}; memcpy(outCols5, v, 5); } break;
+    case '2': { uint8_t v[5] = {0x42, 0x61, 0x51, 0x49, 0x46}; memcpy(outCols5, v, 5); } break;
+    case '3': { uint8_t v[5] = {0x21, 0x41, 0x45, 0x4B, 0x31}; memcpy(outCols5, v, 5); } break;
+    case '4': { uint8_t v[5] = {0x18, 0x14, 0x12, 0x7F, 0x10}; memcpy(outCols5, v, 5); } break;
+    case '5': { uint8_t v[5] = {0x27, 0x45, 0x45, 0x45, 0x39}; memcpy(outCols5, v, 5); } break;
+    case '6': { uint8_t v[5] = {0x3C, 0x4A, 0x49, 0x49, 0x30}; memcpy(outCols5, v, 5); } break;
+    case '7': { uint8_t v[5] = {0x01, 0x71, 0x09, 0x05, 0x03}; memcpy(outCols5, v, 5); } break;
+    case '8': { uint8_t v[5] = {0x36, 0x49, 0x49, 0x49, 0x36}; memcpy(outCols5, v, 5); } break;
+    case '9': { uint8_t v[5] = {0x06, 0x49, 0x49, 0x29, 0x1E}; memcpy(outCols5, v, 5); } break;
+
+    // Letras (A-Z)
+    case 'A': { uint8_t v[5] = {0x7E, 0x11, 0x11, 0x11, 0x7E}; memcpy(outCols5, v, 5); } break;
+    case 'B': { uint8_t v[5] = {0x7F, 0x49, 0x49, 0x49, 0x36}; memcpy(outCols5, v, 5); } break;
+    case 'C': { uint8_t v[5] = {0x3E, 0x41, 0x41, 0x41, 0x22}; memcpy(outCols5, v, 5); } break;
+    case 'D': { uint8_t v[5] = {0x7F, 0x41, 0x41, 0x22, 0x1C}; memcpy(outCols5, v, 5); } break;
+    case 'E': { uint8_t v[5] = {0x7F, 0x49, 0x49, 0x49, 0x41}; memcpy(outCols5, v, 5); } break;
+    case 'F': { uint8_t v[5] = {0x7F, 0x09, 0x09, 0x09, 0x01}; memcpy(outCols5, v, 5); } break;
+    case 'G': { uint8_t v[5] = {0x3E, 0x41, 0x49, 0x49, 0x7A}; memcpy(outCols5, v, 5); } break;
+    case 'H': { uint8_t v[5] = {0x7F, 0x08, 0x08, 0x08, 0x7F}; memcpy(outCols5, v, 5); } break;
+    case 'I': { uint8_t v[5] = {0x00, 0x41, 0x7F, 0x41, 0x00}; memcpy(outCols5, v, 5); } break;
+    case 'J': { uint8_t v[5] = {0x20, 0x40, 0x41, 0x3F, 0x01}; memcpy(outCols5, v, 5); } break;
+    case 'K': { uint8_t v[5] = {0x7F, 0x08, 0x14, 0x22, 0x41}; memcpy(outCols5, v, 5); } break;
+    case 'L': { uint8_t v[5] = {0x7F, 0x40, 0x40, 0x40, 0x40}; memcpy(outCols5, v, 5); } break;
+    case 'M': { uint8_t v[5] = {0x7F, 0x02, 0x0C, 0x02, 0x7F}; memcpy(outCols5, v, 5); } break;
+    case 'N': { uint8_t v[5] = {0x7F, 0x04, 0x08, 0x10, 0x7F}; memcpy(outCols5, v, 5); } break;
+    case 'O': { uint8_t v[5] = {0x3E, 0x41, 0x41, 0x41, 0x3E}; memcpy(outCols5, v, 5); } break;
+    case 'P': { uint8_t v[5] = {0x7F, 0x09, 0x09, 0x09, 0x06}; memcpy(outCols5, v, 5); } break;
+    case 'Q': { uint8_t v[5] = {0x3E, 0x41, 0x51, 0x21, 0x5E}; memcpy(outCols5, v, 5); } break;
+    case 'R': { uint8_t v[5] = {0x7F, 0x09, 0x19, 0x29, 0x46}; memcpy(outCols5, v, 5); } break;
+    case 'S': { uint8_t v[5] = {0x46, 0x49, 0x49, 0x49, 0x31}; memcpy(outCols5, v, 5); } break;
+    case 'T': { uint8_t v[5] = {0x01, 0x01, 0x7F, 0x01, 0x01}; memcpy(outCols5, v, 5); } break;
+    case 'U': { uint8_t v[5] = {0x3F, 0x40, 0x40, 0x40, 0x3F}; memcpy(outCols5, v, 5); } break;
+    case 'V': { uint8_t v[5] = {0x1F, 0x20, 0x40, 0x20, 0x1F}; memcpy(outCols5, v, 5); } break;
+    case 'W': { uint8_t v[5] = {0x7F, 0x20, 0x18, 0x20, 0x7F}; memcpy(outCols5, v, 5); } break;
+    case 'X': { uint8_t v[5] = {0x63, 0x14, 0x08, 0x14, 0x63}; memcpy(outCols5, v, 5); } break;
+    case 'Y': { uint8_t v[5] = {0x03, 0x04, 0x78, 0x04, 0x03}; memcpy(outCols5, v, 5); } break;
+    case 'Z': { uint8_t v[5] = {0x61, 0x51, 0x49, 0x45, 0x43}; memcpy(outCols5, v, 5); } break;
+  }
+}
+
+// =============================
+// MAX7219 Low-Level (SPI nativo)
+// =============================
+static inline void maxCSLow() { digitalWrite(PIN_CS, LOW); }
+static inline void maxCSHigh() { digitalWrite(PIN_CS, HIGH); }
+
+static void maxSendBroadcast(uint8_t reg, uint8_t data) {
+  // En cascada: los datos del "último chip" deben ir primero en el shift.
+  maxCSLow();
+  for (int chip = (int)NUM_CHIPS - 1; chip >= 0; --chip) {
+    maxSpi.transfer(reg);
+    maxSpi.transfer(data);
+  }
+  maxCSHigh();
+}
+
+static void maxSendRow(uint8_t row, const uint8_t rowBytes[NUM_CHIPS]) {
+  // row: 0..7 => registro DIGIT1..DIGIT8 => reg = row+1
+  maxCSLow();
+  for (int chip = (int)NUM_CHIPS - 1; chip >= 0; --chip) {
+    maxSpi.transfer((uint8_t)(row + 1));
+    maxSpi.transfer(rowBytes[chip]);
+  }
+  maxCSHigh();
+}
+
+static void setIntensityAll(uint8_t intensity) {
+  gIntensity = intensity & 0x0F;
+  maxSendBroadcast(0x0A, gIntensity); // INTENSITY reg
+}
+
+static void maxInit() {
+  pinMode(PIN_CS, OUTPUT);
+  maxCSHigh();
+
+  maxSpi.begin(PIN_CLK, PIN_MISO, PIN_DIN, PIN_CS);
+
+  maxSendBroadcast(0x0F, 0x00); // display test OFF
+  maxSendBroadcast(0x09, 0x00); // decode OFF
+  maxSendBroadcast(0x0B, 0x07); // scan limit 8 filas
+  maxSendBroadcast(0x0A, gIntensity & 0x0F); // intensidad
+  maxSendBroadcast(0x0C, 0x01); // ENCENDER
+}
+
+static void clearBuffer() {
+  for (uint8_t y = 0; y < ROWS; ++y) rowMasks[y] = 0;
+  hwDirty = true;
+}
+
+static inline void setPixel(uint8_t x, uint8_t y, bool on) {
+  if (x >= COLS || y >= ROWS) return;
+  if (on) rowMasks[y] |= (1UL << x);
+  else rowMasks[y] &= ~(1UL << x);
+}
+
+static void updateHardware() {
+  // Renderiza buffer->MAX7219
+  if (!hwDirty) return;
+  for (uint8_t y = 0; y < ROWS; ++y) {
+    uint8_t bytes[NUM_CHIPS];
+    for (uint8_t chip = 0; chip < NUM_CHIPS; ++chip) {
+      uint8_t b = 0;
+      for (uint8_t xInChip = 0; xInChip < 8; ++xInChip) {
+        uint8_t x = (uint8_t)(chip * 8 + xInChip);
+        bool on = (rowMasks[y] & (1UL << x)) != 0;
+
+        // MAX7219: típicamente el bit 7 corresponde al "lado izquierdo" del módulo 8x8.
+        if (on) b |= (1U << (7 - xInChip));
+      }
+      // bytes invertido por cascada (para 8x32)
+      bytes[NUM_CHIPS - 1 - chip] = b;
+    }
+    maxSendRow(y, bytes);
+  }
+  hwDirty = false;
+}
+
+// =============================
+// Modo texto (scroll)
+// =============================
+static constexpr uint16_t MAX_TEXT_LEN = 64;
+static constexpr uint16_t CHAR_W = 5;
+static constexpr uint16_t CHAR_SPACING = 1;
+static constexpr uint16_t OFF_WIDTH_MAX = MAX_TEXT_LEN * (CHAR_W + CHAR_SPACING); // 384
+
+static uint8_t offCols[OFF_WIDTH_MAX]; // cada columna guarda bits de filas (bit0..bit6)
+static uint16_t offWidth = 0;
+static int16_t scrollPos = 0;
+static uint16_t scrollSpeedMs = 60;
+static unsigned long lastScrollMs = 0;
+static String currentText = "";
+static bool currentInvert = false;
+
+static void buildTextOffscreen(const String &text) {
+  clearBuffer();
+
+  String t = text;
+  if (t.length() > MAX_TEXT_LEN) t = t.substring(0, MAX_TEXT_LEN);
+
+  offWidth = (uint16_t)(t.length() * (CHAR_W + CHAR_SPACING));
+  if (offWidth > OFF_WIDTH_MAX) offWidth = OFF_WIDTH_MAX;
+
+  // Relleno: por cada caracter (5 columnas) + 1 columna de espacio
+  uint16_t x = 0;
+  for (size_t i = 0; i < t.length() && x < offWidth; ++i) {
+    char c = t[i];
+    uint8_t glyph[5];
+    fontGetGlyphColumns(c, glyph);
+
+    for (uint8_t col = 0; col < CHAR_W && x < offWidth; ++col) {
+      offCols[x++] = glyph[col];
+    }
+    // Espacio
+    if (x < offWidth) offCols[x++] = 0x00;
+  }
+
+  // Para que entre "desde la derecha"
+  scrollPos = -((int16_t)COLS);
+}
+
+static void drawScrollFrame() {
+  clearBuffer();
+
+  for (uint8_t dX = 0; dX < COLS; ++dX) {
+    int16_t globalX = (int16_t)scrollPos + (int16_t)dX;
+    if (globalX < 0 || globalX >= (int16_t)offWidth) continue;
+
+    uint8_t colMask = offCols[globalX];
+    for (uint8_t y = 0; y < ROWS; ++y) {
+      if (colMask & (1U << y)) {
+        setPixel(dX, y, true);
+      }
+    }
+  }
+}
+
+static void applyScrollText(const String &text, uint32_t speedMs) {
+  uint32_t speed = speedMs;
+  if (speed < 5) speed = 5;
+  if (speed > 2000) speed = 2000;
+  scrollSpeedMs = (uint16_t)speed;
+
+  currentText = text;
+  if (currentText.length() > MAX_TEXT_LEN) currentText = currentText.substring(0, MAX_TEXT_LEN);
+  buildTextOffscreen(currentText);
+  mode = DisplayMode::SCROLL_TEXT;
+  hwDirty = true;
+  drawScrollFrame();
+  updateHardware();
+}
+
+// =============================
+// API HTTP local (LAN)
+// =============================
+static void handleRoot() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.sendHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+  server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+  server.sendHeader("Access-Control-Max-Age", "86400");
+  server.send(200, "text/plain",
+              "ESP32 MAX7219 8x32 API\n"
+              "POST /api/text {\"text\":\"HOLA\",\"speedMs\":60,\"intensity\":8}\n"
+              "POST /api/pattern {\"bitmap\":[row0,row1,...row7]}\n"
+              "POST /api/off\n"
+              "GET  /api/state");
+}
+
+static void handleOff() {
+  mode = DisplayMode::OFF;
+  clearBuffer();
+  updateHardware();
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.sendHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+  server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+  server.sendHeader("Access-Control-Max-Age", "86400");
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
+static void handlePattern() {
+  if (!server.hasArg("plain")) {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+    server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+    server.sendHeader("Access-Control-Max-Age", "86400");
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"Falta body JSON\"}");
+    return;
+  }
+
+  String body = server.arg("plain");
+  StaticJsonDocument<256> doc;
+  DeserializationError err = deserializeJson(doc, body);
+  if (err) {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+    server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+    server.sendHeader("Access-Control-Max-Age", "86400");
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"JSON invalido\"}");
+    return;
+  }
+
+  JsonArray arr = doc["bitmap"].as<JsonArray>();
+  if (arr.size() != ROWS) {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+    server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+    server.sendHeader("Access-Control-Max-Age", "86400");
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"bitmap debe tener 8 filas\"}");
+    return;
+  }
+
+  bool invert = doc["invert"] | false;
+  currentInvert = invert;
+  for (uint8_t y = 0; y < ROWS; ++y) {
+    uint32_t mask = (uint32_t)arr[y].as<uint32_t>();
+    if (invert) mask = (~mask) & 0xFFFFFFFFUL;
+    rowMasks[y] = mask;
+  }
+
+  if (doc.containsKey("intensity")) {
+    gIntensity = ((uint8_t)doc["intensity"].as<uint32_t>()) & 0x0F;
+    setIntensityAll(gIntensity);
+  }
+
+  mode = DisplayMode::STATIC_PATTERN;
+  hwDirty = true;
+  updateHardware();
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.sendHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+  server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+  server.sendHeader("Access-Control-Max-Age", "86400");
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
+static void handleText() {
+  if (!server.hasArg("plain")) {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+    server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+    server.sendHeader("Access-Control-Max-Age", "86400");
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"Falta body JSON\"}");
+    return;
+  }
+
+  String body = server.arg("plain");
+  StaticJsonDocument<512> doc;
+  DeserializationError err = deserializeJson(doc, body);
+  if (err) {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+    server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+    server.sendHeader("Access-Control-Max-Age", "86400");
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"JSON invalido\"}");
+    return;
+  }
+
+  const char *text = doc["text"] | "";
+  uint32_t speed = doc["speedMs"] | 60;
+
+  if (doc.containsKey("intensity")) {
+    gIntensity = ((uint8_t)doc["intensity"].as<uint32_t>()) & 0x0F;
+    setIntensityAll(gIntensity);
+  }
+
+  applyScrollText(String(text), speed);
+
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.sendHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+  server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+  server.sendHeader("Access-Control-Max-Age", "86400");
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
+static void handleOptions() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.sendHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+  server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+  server.sendHeader("Access-Control-Max-Age", "86400");
+  server.send(204);
+}
+
+static void handleState() {
+  StaticJsonDocument<1024> doc;
+
+  if (mode == DisplayMode::OFF) doc["mode"] = "off";
+  else if (mode == DisplayMode::STATIC_PATTERN) doc["mode"] = "pattern";
+  else if (mode == DisplayMode::SCROLL_TEXT) doc["mode"] = "text";
+
+  doc["intensity"] = gIntensity;
+  doc["speedMs"] = scrollSpeedMs;
+  doc["invert"] = currentInvert;
+  doc["text"] = currentText;
+
+  JsonArray arr = doc.createNestedArray("bitmap");
+  for (uint8_t y = 0; y < ROWS; ++y) arr.add(rowMasks[y]);
+
+  String payload;
+  serializeJson(doc, payload);
+
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.sendHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+  server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+  server.sendHeader("Access-Control-Max-Age", "86400");
+  server.send(200, "application/json", payload);
+}
+
+static void setupServer() {
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/api/off", HTTP_POST, handleOff);
+  server.on("/api/pattern", HTTP_POST, handlePattern);
+  server.on("/api/text", HTTP_POST, handleText);
+  server.on("/api/state", HTTP_GET, handleState);
+
+  // CORS preflight (OPTIONS)
+  server.on("/api/off", HTTP_OPTIONS, handleOptions);
+  server.on("/api/pattern", HTTP_OPTIONS, handleOptions);
+  server.on("/api/text", HTTP_OPTIONS, handleOptions);
+  server.on("/api/state", HTTP_OPTIONS, handleOptions);
+  server.on("/", HTTP_OPTIONS, handleOptions);
+
+  server.begin();
+}
+
+// =============================
+// Pruebas por monitor serie (USB)
+// =============================
+static String serialLineBuf;
+
+static void processSerialInput() {
+  while (Serial.available() > 0) {
+    int r = Serial.read();
+    if (r < 0) break;
+    char c = (char)r;
+    if (c == '\r') continue;
+    if (c == '\n') {
+      String line = serialLineBuf;
+      serialLineBuf = "";
+      line.trim();
+      if (line.length() == 0) continue;
+
+      if (line.equalsIgnoreCase("off")) {
+        mode = DisplayMode::OFF;
+        clearBuffer();
+        updateHardware();
+        Serial.println(F("[OK] Matriz apagada."));
+        continue;
+      }
+
+      // speed <ms>
+      if (line.length() > 6 && line.substring(0, 6).equalsIgnoreCase("speed ")) {
+        int sp = line.substring(6).toInt();
+        if (sp < 5) sp = 5;
+        if (sp > 2000) sp = 2000;
+        scrollSpeedMs = (uint16_t)sp;
+        Serial.print(F("[OK] Velocidad scroll: "));
+        Serial.print(scrollSpeedMs);
+        Serial.println(F(" ms"));
+        continue;
+      }
+
+      applyScrollText(line, scrollSpeedMs);
+      Serial.print(F("[OK] Mostrando: "));
+      Serial.println(line);
+      continue;
+    }
+    if (serialLineBuf.length() < (int)MAX_TEXT_LEN + 16) {
+      serialLineBuf += c;
+    }
+  }
+}
+
+// =============================
+// WIFI
+// =============================
+static void connectWifiBlocking(uint32_t timeoutMs) {
+  WiFi.mode(WIFI_STA);
+  WiFi.setHostname(HOSTNAME);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(250);
+    if (millis() - start > timeoutMs) break;
+  }
+}
+
+static void ensureWifiConnected() {
+  if (WiFi.status() == WL_CONNECTED) return;
+  unsigned long now = millis();
+  if (now - lastWifiRetryMs < WIFI_RETRY_EVERY_MS) return;
+  lastWifiRetryMs = now;
+  WiFi.disconnect(false);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+}
+
+// =============================
+// CLOUD helpers (Vercel)
+// =============================
+static bool cloudPostJson(const String &path, const String &jsonBody, String &outResponse, int &outCode) {
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+  http.setTimeout(3500);
+
+  String url = String(CLOUD_BASE_URL) + path;
+  if (!http.begin(client, url)) return false;
+
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("x-device-token", DEVICE_TOKEN);
+
+  outCode = http.POST((uint8_t *)jsonBody.c_str(), jsonBody.length());
+  outResponse = (outCode > 0) ? http.getString() : "";
+  http.end();
+  return outCode > 0;
+}
+
+static void cloudPollAndApply() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  unsigned long now = millis();
+  if (now - lastPollMs < POLL_EVERY_MS) return;
+  lastPollMs = now;
+
+  StaticJsonDocument<96> req;
+  req["deviceId"] = DEVICE_ID;
+  String reqBody;
+  serializeJson(req, reqBody);
+
+  String resp;
+  int code = 0;
+  if (!cloudPostJson("/api/device/poll", reqBody, resp, code)) return;
+  if (code != 200) return;
+
+  StaticJsonDocument<768> doc;
+  DeserializationError err = deserializeJson(doc, resp);
+  if (err) return;
+
+  if (!(doc["ok"] | false)) return;
+  if (doc["command"].isNull()) return;
+
+  const char *type = doc["command"]["type"] | "";
+
+  if (strcmp(type, "off") == 0) {
+    mode = DisplayMode::OFF;
+    clearBuffer();
+    updateHardware();
+    return;
+  }
+
+  if (strcmp(type, "text") == 0) {
+    const char *text = doc["command"]["text"] | "";
+    uint32_t speedMs = doc["command"]["speedMs"] | scrollSpeedMs;
+
+    if (doc["command"].containsKey("intensity")) {
+      gIntensity = ((uint8_t)doc["command"]["intensity"].as<uint32_t>()) & 0x0F;
+      setIntensityAll(gIntensity);
+    }
+
+    applyScrollText(String(text), speedMs);
+    return;
+  }
+
+  if (strcmp(type, "pattern") == 0) {
+    bool invert = doc["command"]["invert"] | false;
+    currentInvert = invert;
+
+    JsonArray arr = doc["command"]["bitmap"].as<JsonArray>();
+    if (arr.size() != ROWS) return;
+
+    for (uint8_t y = 0; y < ROWS; ++y) {
+      uint32_t mask = (uint32_t)arr[y].as<uint32_t>();
+      if (invert) mask = (~mask) & 0xFFFFFFFFUL;
+      rowMasks[y] = mask;
+    }
+
+    if (doc["command"].containsKey("intensity")) {
+      gIntensity = ((uint8_t)doc["command"]["intensity"].as<uint32_t>()) & 0x0F;
+      setIntensityAll(gIntensity);
+    }
+
+    mode = DisplayMode::STATIC_PATTERN;
+    hwDirty = true;
+    updateHardware();
+    return;
+  }
+}
+
+static void cloudReportState() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  unsigned long now = millis();
+  if (now - lastReportMs < REPORT_EVERY_MS) return;
+  lastReportMs = now;
+
+  StaticJsonDocument<768> payload;
+  payload["deviceId"] = DEVICE_ID;
+
+  JsonObject state = payload.createNestedObject("state");
+  if (mode == DisplayMode::OFF) state["mode"] = "off";
+  else if (mode == DisplayMode::STATIC_PATTERN) state["mode"] = "pattern";
+  else state["mode"] = "text";
+
+  state["intensity"] = gIntensity;
+  state["speedMs"] = scrollSpeedMs;
+  state["invert"] = currentInvert;
+  state["text"] = currentText;
+
+  // bitmap (8x32)
+  JsonArray arr = state.createNestedArray("bitmap");
+  for (uint8_t y = 0; y < ROWS; ++y) arr.add(rowMasks[y]);
+
+  String body;
+  serializeJson(payload, body);
+
+  String resp;
+  int code = 0;
+  (void)cloudPostJson("/api/device/report", body, resp, code);
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(100);
+
+  connectWifiBlocking(20000);
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("No se pudo conectar WiFi (ver SSID/PASS).");
+  }
+
+  Serial.println();
+  Serial.println(F("=== Prueba por terminal (115200) ==="));
+  Serial.println(F("Escribe texto y Enter -> scroll en la matriz (max 64 caracteres)."));
+  Serial.println(F("Comandos: off | speed <5-2000>"));
+  Serial.println();
+
+  maxInit();
+  clearBuffer();
+  updateHardware();
+
+  setupServer();
+  mode = DisplayMode::OFF;
+}
+
+void loop() {
+  server.handleClient();
+  processSerialInput();
+
+  ensureWifiConnected();
+
+  // Control remoto por Vercel
+  cloudPollAndApply();
+  cloudReportState();
+
+  // Scroll local
+  if (mode == DisplayMode::SCROLL_TEXT) {
+    unsigned long now = millis();
+    if (now - lastScrollMs >= scrollSpeedMs) {
+      lastScrollMs = now;
+      drawScrollFrame();
+      updateHardware();
+
+      scrollPos++;
+      if (scrollPos > (int16_t)offWidth) {
+        scrollPos = -((int16_t)COLS);
+      }
+    }
+  }
+}
+

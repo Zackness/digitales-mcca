@@ -1,5 +1,5 @@
-import crypto from 'crypto'
-import type { IncomingMessage } from 'http'
+import { createHmac, timingSafeEqual } from 'node:crypto'
+import type { IncomingMessage } from 'node:http'
 
 const COOKIE_NAME = 'mcca_session'
 
@@ -24,7 +24,7 @@ function b64urlDecodeToBuffer(s: string) {
 }
 
 function sign(data: string, secret: string) {
-  return b64urlEncode(crypto.createHmac('sha256', secret).update(data).digest())
+  return b64urlEncode(createHmac('sha256', secret).update(data).digest())
 }
 
 type SessionPayload = { exp: number }
@@ -44,7 +44,10 @@ export function verifySessionToken(token: string): SessionPayload | null {
   if (parts.length !== 2) return null
   const [body, sig] = parts
   const expected = sign(body, secret)
-  if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null
+  const sigBuf = Buffer.from(sig)
+  const expBuf = Buffer.from(expected)
+  if (sigBuf.length !== expBuf.length) return null
+  if (!timingSafeEqual(sigBuf, expBuf)) return null
 
   try {
     const json = JSON.parse(b64urlDecodeToBuffer(body).toString('utf8')) as SessionPayload
