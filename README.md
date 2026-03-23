@@ -1,73 +1,43 @@
-# React + TypeScript + Vite
+# digitales-mcca (Web + ESP32 remoto)
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Este repo contiene:
 
-Currently, two official plugins are available:
+- **Frontend (Vite + React)** en `src/`
+- **API para Vercel (Serverless Functions)** en `api/`
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+La idea es que la web (en Vercel) hable con su propio backend `/api/*`, y el ESP32 se conecte por Internet **sin abrir puertos** haciendo polling HTTPS.
 
-## React Compiler
+## Arquitectura
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- **Web (Vercel)**:
+  - Login: `POST /api/auth/login` (cookie HttpOnly)
+  - Enviar comando: `POST /api/app/send`
+  - Consultar estado: `GET /api/app/state?deviceId=...`
+- **ESP32**:
+  - Poll comando: `POST /api/device/poll` con header `x-device-token`
+  - Reportar estado: `POST /api/device/report` con header `x-device-token`
 
-## Expanding the ESLint configuration
+Los comandos se guardan en una cola (Redis) y el estado se persiste con TTL.
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+## Variables de entorno (Vercel)
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+En tu proyecto de Vercel ve a **Settings → Environment Variables** y define:
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+- **`AUTH_SECRET`**: un secreto largo para firmar la cookie.
+- **`AUTH_PASSWORD`**: password para entrar a la web.
+- **`DEVICE_TOKEN`**: token que llevará el ESP32 en `x-device-token`.
+- **Vercel KV** (recomendado):
+  - **`KV_REST_API_URL`**
+  - **`KV_REST_API_TOKEN`**
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+> Si usas Upstash directo, también valen `UPSTASH_REDIS_REST_URL` y `UPSTASH_REDIS_REST_TOKEN`.
+
+## Desarrollo local
+
+```bash
+npm install
+npm run dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+La API `api/*` está pensada para Vercel. Para pruebas locales puedes desplegar a Vercel Preview o usar `vercel dev` (opcional).
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
