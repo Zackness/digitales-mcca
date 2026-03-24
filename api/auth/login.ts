@@ -1,15 +1,41 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node'
-import { buildSetCookieSession, checkPassword, makeSessionToken } from '../_lib/auth'
+import { buildSetCookieSession, checkPassword, isAuthConfigured, makeSessionToken } from '../_lib/auth'
 import { readJson, sendJson } from '../_lib/http'
 
 export const config = {
   runtime: 'nodejs',
+  maxDuration: 30,
 } as const
 
+function errMessage(e: unknown): string {
+  if (e instanceof Error) return e.message
+  return String(e)
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  if (req.method === 'OPTIONS') {
+    res.statusCode = 204
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+    res.setHeader('Access-Control-Max-Age', '86400')
+    return res.end()
+  }
+
   if (req.method !== 'POST') {
-    res.setHeader('Allow', 'POST')
+    res.setHeader('Allow', 'POST, OPTIONS')
     return sendJson(res, 405, { ok: false, error: 'Method not allowed' })
+  }
+
+  // Evita crashes por getEnv() dentro de makeSessionToken si falta AUTH_SECRET en Production
+  if (!isAuthConfigured()) {
+    console.error(
+      '[login] Faltan AUTH_SECRET o AUTH_PASSWORD. Revisa Variables de entorno en Vercel (entorno Production).',
+    )
+    return sendJson(res, 503, {
+      ok: false,
+      error:
+        'Servidor no configurado: define AUTH_SECRET y AUTH_PASSWORD en Vercel (Production, Preview según el despliegue).',
+    })
   }
 
   try {
@@ -24,7 +50,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     res.setHeader('Set-Cookie', buildSetCookieSession(token, maxAgeSeconds))
     return sendJson(res, 200, { ok: true })
   } catch (e) {
-    return sendJson(res, 400, { ok: false, error: (e as Error).message })
+    console.error('[login]', e)
+    return sendJson(res, 400, { ok: false, error: errMessage(e) })
   }
 }
 

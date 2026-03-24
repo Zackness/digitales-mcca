@@ -1,4 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node'
+import { isAuthConfigured } from './_lib/auth'
 import { sendJson } from './_lib/http'
 
 export const config = {
@@ -28,6 +29,7 @@ export default function handler(_req: VercelRequest, res: VercelResponse) {
     ok: true,
     node: process.version,
     env,
+    authConfigured: isAuthConfigured(),
   })
 }
 

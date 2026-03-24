@@ -5,8 +5,10 @@ const COOKIE_NAME = 'mcca_session'
 
 function getEnv(name: string): string {
   const v = process.env[name]
-  if (!v || v.trim().length === 0) throw new Error(`Falta variable de entorno ${name}`)
-  return v
+  // Trim: en Vercel a veces se copia un salto de línea al final del valor
+  const t = v?.trim()
+  if (!t || t.length === 0) throw new Error(`Falta variable de entorno ${name}`)
+  return t
 }
 
 function b64urlEncode(buf: Buffer) {
@@ -119,7 +121,14 @@ export function buildClearCookie() {
 }
 
 export function checkPassword(password: string) {
-  const expected = getEnv('AUTH_PASSWORD')
+  // No usar getEnv aquí: si falta la variable, devolvemos false (401) en lugar de lanzar.
+  const expected = process.env.AUTH_PASSWORD?.trim()
+  if (!expected) return false
   return password === expected
+}
+
+/** Para diagnóstico / health: true si login puede funcionar */
+export function isAuthConfigured(): boolean {
+  return Boolean(process.env.AUTH_PASSWORD?.trim() && process.env.AUTH_SECRET?.trim())
 }
 

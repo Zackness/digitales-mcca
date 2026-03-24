@@ -1,4 +1,4 @@
-import type { IncomingMessage } from 'node:http'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 
 export function isJsonContentType(req: IncomingMessage) {
   const ct = String(req.headers['content-type'] ?? '')
@@ -7,23 +7,19 @@ export function isJsonContentType(req: IncomingMessage) {
 
 export async function readBody(req: IncomingMessage): Promise<string> {
   let data = ''
-  try {
-    // En algunos entornos (como serverless), el body puede ya venir consumido/parsiado.
-    // El iterador async resuelve correctamente incluso si el stream ya terminó.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const anyReq = req as any
-    if (typeof anyReq.body === 'string') return anyReq.body
-    if (anyReq.body && typeof anyReq.body === 'object') return JSON.stringify(anyReq.body)
+  // En algunos entornos (como serverless), el body puede ya venir consumido/parsiado.
+  // El iterador async resuelve correctamente incluso si el stream ya terminó.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const anyReq = req as any
+  if (typeof anyReq.body === 'string') return anyReq.body
+  if (anyReq.body && typeof anyReq.body === 'object') return JSON.stringify(anyReq.body)
 
-    // Node stream
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    for await (const chunk of req as any) {
-      data += chunk.toString()
-    }
-    return data
-  } catch (e) {
-    throw e
+  // Node stream
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  for await (const chunk of req as any) {
+    data += chunk.toString()
   }
+  return data
 }
 
 export async function readJson<T>(req: IncomingMessage): Promise<T> {
@@ -36,7 +32,24 @@ export async function readJson<T>(req: IncomingMessage): Promise<T> {
       if (!raw || raw.trim().length === 0) throw new Error('Body vacío')
       return JSON.parse(raw) as T
     }
-    if (typeof anyReq.body === 'object') return anyReq.body as T
+    // Buffer / Uint8Array (algunos runtimes envían el body así)
+    if (typeof Buffer !== 'undefined' && Buffer.isBuffer(anyReq.body)) {
+      const raw = anyReq.body.toString('utf8')
+      if (!raw || raw.trim().length === 0) throw new Error('Body vacío')
+      return JSON.parse(raw) as T
+    }
+    if (anyReq.body instanceof Uint8Array && !(anyReq.body instanceof Buffer)) {
+      const raw = Buffer.from(anyReq.body).toString('utf8')
+      if (!raw || raw.trim().length === 0) throw new Error('Body vacío')
+      return JSON.parse(raw) as T
+    }
+    // Objeto JSON ya parseado (Vercel / middlewares)
+    if (typeof anyReq.body === 'object' && !Array.isArray(anyReq.body)) {
+      return anyReq.body as T
+    }
+    if (Array.isArray(anyReq.body)) {
+      return anyReq.body as T
+    }
   }
 
   const raw = await readBody(req)
@@ -44,9 +57,15 @@ export async function readJson<T>(req: IncomingMessage): Promise<T> {
   return JSON.parse(raw) as T
 }
 
-export function sendJson(res: any, status: number, payload: unknown) {
+export function sendJson(res: ServerResponse, status: number, payload: unknown) {
+  if (res.headersSent) return
   res.statusCode = status
   res.setHeader('Content-Type', 'application/json; charset=utf-8')
-  res.end(JSON.stringify(payload))
+  try {
+    res.end(JSON.stringify(payload))
+  } catch {
+    res.statusCode = 500
+    res.end(JSON.stringify({ ok: false, error: 'Error serializando respuesta' }))
+  }
 }
 
