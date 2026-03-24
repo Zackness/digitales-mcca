@@ -26,22 +26,22 @@ async function getJson<T>(path: string): Promise<T> {
 }
 
 export async function cloudLogin(password: string): Promise<boolean> {
-  const json = await postJson<{ ok: boolean }>('/api/auth/login', { password })
+  const json = await postJson<{ ok: boolean }>('/api/login', { password })
   return Boolean(json.ok)
 }
 
 export async function cloudLogout(): Promise<boolean> {
-  const json = await postJson<{ ok: boolean }>('/api/auth/logout', {})
+  const json = await postJson<{ ok: boolean }>('/api/logout', {})
   return Boolean(json.ok)
 }
 
 export async function cloudSendOff(deviceId: string): Promise<boolean> {
-  const json = await postJson<{ ok: boolean }>('/api/app/send', { deviceId, command: { type: 'off' } })
+  const json = await postJson<{ ok: boolean }>('/api/send', { deviceId, command: { type: 'off' } })
   return Boolean(json.ok)
 }
 
 export async function cloudSendText(deviceId: string, payload: Esp32TextPayload): Promise<boolean> {
-  const json = await postJson<{ ok: boolean }>('/api/app/send', {
+  const json = await postJson<{ ok: boolean }>('/api/send', {
     deviceId,
     command: { type: 'text', ...payload },
   })
@@ -49,7 +49,7 @@ export async function cloudSendText(deviceId: string, payload: Esp32TextPayload)
 }
 
 export async function cloudSendPattern(deviceId: string, payload: Esp32PatternPayload): Promise<boolean> {
-  const json = await postJson<{ ok: boolean }>('/api/app/send', {
+  const json = await postJson<{ ok: boolean }>('/api/send', {
     deviceId,
     command: { type: 'pattern', ...payload },
   })
@@ -58,6 +58,6 @@ export async function cloudSendPattern(deviceId: string, payload: Esp32PatternPa
 
 export async function cloudGetState(deviceId: string): Promise<CloudStateResponse> {
   const qp = new URLSearchParams({ deviceId })
-  return await getJson<CloudStateResponse>(`/api/app/state?${qp.toString()}`)
+  return await getJson<CloudStateResponse>(`/api/state?${qp.toString()}`)
 }
 

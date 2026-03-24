@@ -1,8 +1,8 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node'
-import { requireDeviceToken } from '../_lib/auth'
-import { readJson, sendJson } from '../_lib/http'
-import { getRedis, keyCmdQueue, keyLastSeen } from '../_lib/redis'
-import type { Esp32Command } from '../_lib/types'
+import { requireDeviceToken } from '../auth'
+import { readJson, sendJson } from '../http'
+import { getRedis, keyCmdQueue, keyLastSeen } from '../redis'
+import type { Esp32Command } from '../types'
 
 export const config = {
   runtime: 'nodejs',
@@ -44,4 +44,3 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return sendJson(res, 400, { ok: false, error: (e as Error).message })
   }
 }
-

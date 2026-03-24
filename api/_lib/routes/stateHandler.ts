@@ -1,8 +1,8 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node'
-import { requireAppSession } from '../_lib/auth'
-import { sendJson } from '../_lib/http'
-import { getRedis, keyLastSeen, keyState } from '../_lib/redis'
-import type { Esp32State } from '../_lib/types'
+import { requireAppSession } from '../auth'
+import { sendJson } from '../http'
+import { getRedis, keyLastSeen, keyState } from '../redis'
+import type { Esp32State } from '../types'
 
 export const config = {
   runtime: 'nodejs',
@@ -46,4 +46,3 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return sendJson(res, 500, { ok: false, error: (e as Error).message })
   }
 }
-

@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node'
-import { buildSetCookieSession, checkPassword, isAuthConfigured, makeSessionToken } from '../_lib/auth'
-import { readJson, sendJson } from '../_lib/http'
+import { buildSetCookieSession, checkPassword, isAuthConfigured, makeSessionToken } from '../auth'
+import { readJson, sendJson } from '../http'
 
 export const config = {
   runtime: 'nodejs',
@@ -26,7 +26,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return sendJson(res, 405, { ok: false, error: 'Method not allowed' })
   }
 
-  // Evita crashes por getEnv() dentro de makeSessionToken si falta AUTH_SECRET en Production
   if (!isAuthConfigured()) {
     console.error(
       '[login] Faltan AUTH_SECRET o AUTH_PASSWORD. Revisa Variables de entorno en Vercel (entorno Production).',
@@ -54,4 +53,3 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return sendJson(res, 400, { ok: false, error: errMessage(e) })
   }
 }
-

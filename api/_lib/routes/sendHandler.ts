@@ -1,8 +1,8 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node'
-import { requireAppSession } from '../_lib/auth'
-import { readJson, sendJson } from '../_lib/http'
-import { getRedis, keyCmdQueue } from '../_lib/redis'
-import type { Esp32Command } from '../_lib/types'
+import { requireAppSession } from '../auth'
+import { readJson, sendJson } from '../http'
+import { getRedis, keyCmdQueue } from '../redis'
+import type { Esp32Command } from '../types'
 
 export const config = {
   runtime: 'nodejs',
@@ -14,7 +14,6 @@ type Body = {
 }
 
 function isValidDeviceId(deviceId: string) {
-  // simple: letras/numeros/guion/underscore (evita claves raras)
   return /^[a-zA-Z0-9_-]{1,64}$/.test(deviceId)
 }
 
@@ -32,7 +31,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const command = body.command
     if (!command || typeof command !== 'object') return sendJson(res, 400, { ok: false, error: 'Falta command' })
 
-    // Validación mínima por tipo
     if (command.type === 'text') {
       if (typeof command.text !== 'string' || command.text.trim().length === 0) {
         return sendJson(res, 400, { ok: false, error: 'text inválido' })
@@ -46,11 +44,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     const redis = getRedis()
     await redis.rpush(keyCmdQueue(deviceId), JSON.stringify(command))
-    // opcional: limitar cola (mantener lo último)
     await redis.ltrim(keyCmdQueue(deviceId), -50, -1)
     return sendJson(res, 200, { ok: true })
   } catch (e) {
     return sendJson(res, 400, { ok: false, error: (e as Error).message })
   }
 }
-

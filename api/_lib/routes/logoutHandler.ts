@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node'
-import { buildClearCookie } from '../_lib/auth'
-import { sendJson } from '../_lib/http'
+import { buildClearCookie } from '../auth'
+import { sendJson } from '../http'
 
 export const config = {
   runtime: 'nodejs',
@@ -15,4 +15,3 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader('Set-Cookie', buildClearCookie())
   return sendJson(res, 200, { ok: true })
 }
-

@@ -2,5 +2,13 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
-  "framework": "vite"
+  "framework": "vite",
+  "rewrites": [
+    { "source": "/api/auth/login", "destination": "/api/login" },
+    { "source": "/api/auth/logout", "destination": "/api/logout" },
+    { "source": "/api/app/send", "destination": "/api/send" },
+    { "source": "/api/app/state", "destination": "/api/state" },
+    { "source": "/api/device/poll", "destination": "/api/device-poll" },
+    { "source": "/api/device/report", "destination": "/api/device-report" }
+  ]
 }
