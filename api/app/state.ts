@@ -4,6 +4,10 @@ import { sendJson } from '../_lib/http'
 import { getRedis, keyLastSeen, keyState } from '../_lib/redis'
 import type { Esp32State } from '../_lib/types'
 
+export const config = {
+  runtime: 'nodejs',
+} as const
+
 function isValidDeviceId(deviceId: string) {
   return /^[a-zA-Z0-9_-]{1,64}$/.test(deviceId)
 }

@@ -4,6 +4,10 @@ import { readJson, sendJson } from '../_lib/http'
 import { getRedis, keyCmdQueue } from '../_lib/redis'
 import type { Esp32Command } from '../_lib/types'
 
+export const config = {
+  runtime: 'nodejs',
+} as const
+
 type Body = {
   deviceId?: string
   command?: Esp32Command

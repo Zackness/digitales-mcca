@@ -4,6 +4,10 @@ import { readJson, sendJson } from '../_lib/http'
 import { getRedis, keyLastSeen, keyState } from '../_lib/redis'
 import type { Esp32State } from '../_lib/types'
 
+export const config = {
+  runtime: 'nodejs',
+} as const
+
 type Body = { deviceId?: string; state?: Esp32State }
 
 function isValidDeviceId(deviceId: string) {

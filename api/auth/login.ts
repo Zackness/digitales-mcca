@@ -2,6 +2,10 @@ import type { VercelRequest, VercelResponse } from '@vercel/node'
 import { buildSetCookieSession, checkPassword, makeSessionToken } from '../_lib/auth'
 import { readJson, sendJson } from '../_lib/http'
 
+export const config = {
+  runtime: 'nodejs',
+} as const
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'POST') {
     res.setHeader('Allow', 'POST')
